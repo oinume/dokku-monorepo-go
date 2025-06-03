@@ -5,32 +5,56 @@ source "$PLUGIN_CORE_AVAILABLE_PATH/common/functions"
 
 APP="$1"
 TMP_WORK_DIR="$2"
-REV="$3"
+REV="$3" # It's not used for now
 
 [[ ! -f "$TMP_WORK_DIR/.dokku-monorepo" ]] && exit
 
-dokku_log_info2 ".dokku-monorepo found"
+dokku_log_info2 ".dokku-monorepo found. APP=$APP TMP_WORK_DIR=$TMP_WORK_DIR"
+
+go_package_found=false
+go_packages=()
+go_packages_tmp_dir="$(mktemp -d)"
+app_found=false
 
 while IFS="=" read -u 20 -a line || [[ -n $line ]]; do
-  [[ "${line[0]}" == "#"* || "${line[1]}" == "" ]] && continue
-  [[ $APP != *"${line[0]}"* ]] && continue
+  $name="${line[0]}"
+  $path="${line[1]}"
+  [[ $name == "#"* || $path == "" ]] && continue
 
-  app_subdir="${line[1]}"
-  dokku_log_info2 "Installing from ./$app_subdir"
+  # push the path to go_packages with tmp dir
+  if [[ $name == "github.com"* ]]; then
+    dokku_log_info2 "Found go package: $name -> $path"
+    go_package_found=true
+    mv -T "$TMP_WORK_DIR/$path" "$go_package_tmp_dir/$path"
+    go_packages+=("$path")
+  fi
 
-  # Move the app we want to deploy to a temp directory.
-  app_tmp_dir="$(mktemp -d)"
-  mv -T "$TMP_WORK_DIR/$app_subdir" "$app_tmp_dir/app"
+  if [[ $APP == *"${line[0]}"* ]]; then
+    $app_found=true
+    app_subdir="${line[1]}"
+    dokku_log_info2 "Installing from ./$app_subdir"
 
-  # Delete all files that aren't related to the app we are trying to deploy
-  find "$TMP_WORK_DIR" -mindepth 1 -delete
+    # Move the app we want to deploy to a temp directory.
+    app_tmp_dir="$(mktemp -d)"
+    mv -T "$TMP_WORK_DIR/$app_subdir" "$app_tmp_dir/app"
 
-  # Move the app back into the TMP_WORK_DIR
-  find "$app_tmp_dir/app" -mindepth 1 -maxdepth 1 -print0 | xargs -0 mv -t "$TMP_WORK_DIR"
+    # Delete all files that aren't related to the app we are trying to deploy
+    find "$TMP_WORK_DIR" -mindepth 1 -delete
 
-  rm -rf "$app_tmp_dir"
-  exit
+    # Move the app back into the TMP_WORK_DIR
+    find "$app_tmp_dir/app" -mindepth 1 -maxdepth 1 -print0 | xargs -0 mv -t "$TMP_WORK_DIR"
+
+    rm -rf "$app_tmp_dir"
+  fi
 done 20<"$TMP_WORK_DIR/.dokku-monorepo"
+
+if [[ $go_package_found == true ]]; then
+  for path in "${go_packages[@]}"; do
+    dokku_log_info2 "Extract go package: $name -> $path"
+    # Move the go package back into the TMP_WORK_DIR
+    find "$go_package_tmp_dir/$path" -mindepth 1 -maxdepth 1 -print0 | xargs -0 mv -t "$TMP_WORK_DIR"
+  done
+fi
 
 dokku_log_info2 "The application $APP is not defined in .dokku-monorepo!"
 exit 1
