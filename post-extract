@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+
+# How to test
+# rsync -av --delete ~/workspace/oinume/products/ tmp/products/
+# PLUGIN_CORE_AVAILABLE_PATH=. ./post-extract mojindeks-backend-dev tmp/products
+set -eo pipefail; [[ $DOKKU_TRACE ]] && set -x
+source "$PLUGIN_CORE_AVAILABLE_PATH/common/functions"
+
+APP="$1"
+TMP_WORK_DIR="$2"
+REV="$3" # It's not used for now
+
+[[ ! -f "$TMP_WORK_DIR/.dokku-monorepo" ]] && exit
+
+dokku_log_info2 ".dokku-monorepo found. APP=$APP TMP_WORK_DIR=$TMP_WORK_DIR"
+
+MV=mv
+SED=sed
+if [[ "$OSTYPE" == "darwin"* ]]; then
+  # macOS
+  if command -v gmv &> /dev/null; then
+    MV=gmv
+  else
+    echo "gmv is not installed. Please install it with 'brew install coreutils'" 
+    exit 1
+  fi
+  if command -v gsed &> /dev/null; then
+    SED=gsed
+  else
+    echo "gsed is not installed. Please install it with 'brew install gnu-sed'" 
+    exit 1
+  fi
+fi
+
+go_package_found=false
+go_packages=()
+go_packages_tmp_dir="$(mktemp -d)"
+
+app_found=false
+app_subdir=""
+
+while IFS="=" read -u 20 -a line || [[ -n $line ]]; do
+  name="${line[0]}"
+  path="${line[1]}"
+  [[ "$name" == "#"* || "$path" == "" ]] && continue
+
+  # push the path to go_packages with tmp dir
+  if [[ $name == "github.com"* ]]; then
+    dokku_log_info2 "Found go package: $name -> $path"
+    go_package_found=true
+    go_packages+=("$path")
+
+    echo "Save go package: $TMP_WORK_DIR/$path/ -> $go_packages_tmp_dir/$path/"
+    mkdir -p "$go_packages_tmp_dir/$path"
+    rsync -av "$TMP_WORK_DIR/$path/" "$go_packages_tmp_dir/$path/"
+  fi
+
+  if [[ $APP == *"${line[0]}"* ]]; then
+    app_found=true
+    app_subdir="${line[1]}"
+  fi
+done 20<"$TMP_WORK_DIR/.dokku-monorepo"
+
+if [[ $app_found == true ]]; then
+  dokku_log_info2 "Installing from ./$app_subdir"
+  # Move the app we want to deploy to a temp directory.
+  app_tmp_dir="$(mktemp -d)"
+  $MV -T "$TMP_WORK_DIR/$app_subdir" "$app_tmp_dir/app"
+  # Delete all files that aren't related to the app we are trying to deploy
+  find "$TMP_WORK_DIR" -mindepth 1 -delete
+  # Move the app back into the TMP_WORK_DIR
+  find "$app_tmp_dir/app" -mindepth 1 -maxdepth 1 -print0 | xargs -0 $MV -t "$TMP_WORK_DIR"
+  # Clean up
+  rm -rf "$app_tmp_dir"
+fi
+
+if [[ $go_package_found == true ]]; then
+  for path in "${go_packages[@]}"; do
+    dokku_log_info2 "Extract go package: $name -> $path"
+
+    echo "Restore go package: $go_packages_tmp_dir/$path/ -> $TMP_WORK_DIR/$path/"
+    mkdir -p "$TMP_WORK_DIR/$path"
+    rsync -av "$go_packages_tmp_dir/$path/" "$TMP_WORK_DIR/$path/"
+
+    if [ -f "$TMP_WORK_DIR/go.mod" ]; then
+      $SED -i 's|replace github.com/oinume/products/packages/go => \.\./\.\./\.\./packages/go|replace github.com/oinume/products/packages/go => \./packages/go|' "$TMP_WORK_DIR/go.mod"
+      cd "$TMP_WORK_DIR"
+      go mod tidy
+    fi
+  done
+fi
+
+if [[ $app_found == false ]]; then
+  dokku_log_info2 "The application $APP is not defined in .dokku-monorepo!"
+  exit 1
+fi
