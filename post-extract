@@ -14,13 +14,20 @@ REV="$3" # It's not used for now
 
 dokku_log_info2 ".dokku-monorepo found. APP=$APP TMP_WORK_DIR=$TMP_WORK_DIR"
 
-MV="mv"
+MV=mv
+SED=sed
 if [[ "$OSTYPE" == "darwin"* ]]; then
   # macOS
   if command -v gmv &> /dev/null; then
-    MV="gmv"
+    MV=gmv
   else
     echo "gmv is not installed. Please install it with 'brew install coreutils'" 
+    exit 1
+  fi
+  if command -v gsed &> /dev/null; then
+    SED=gsed
+  else
+    echo "gsed is not installed. Please install it with 'brew install gnu-sed'" 
     exit 1
   fi
 fi
@@ -41,10 +48,11 @@ while IFS="=" read -u 20 -a line || [[ -n $line ]]; do
   if [[ $name == "github.com"* ]]; then
     dokku_log_info2 "Found go package: $name -> $path"
     go_package_found=true
-    mkdir -p "$go_packages_tmp_dir/$path"
-    echo "Copy go package: $TMP_WORK_DIR/$path/ -> $go_packages_tmp_dir/$path/"
-    rsync -a "$TMP_WORK_DIR/$path/" "$go_packages_tmp_dir/$path/"
     go_packages+=("$path")
+
+    echo "Save go package: $TMP_WORK_DIR/$path/ -> $go_packages_tmp_dir/$path/"
+    mkdir -p "$go_packages_tmp_dir/$path"
+    rsync -av "$TMP_WORK_DIR/$path/" "$go_packages_tmp_dir/$path/"
   fi
 
   if [[ $APP == *"${line[0]}"* ]]; then
@@ -52,17 +60,6 @@ while IFS="=" read -u 20 -a line || [[ -n $line ]]; do
     app_subdir="${line[1]}"
   fi
 done 20<"$TMP_WORK_DIR/.dokku-monorepo"
-
-if [[ $go_package_found == true ]]; then
-  for path in "${go_packages[@]}"; do
-    dokku_log_info2 "Extract go package: $name -> $path"
-    mkdir -p "$TMP_WORK_DIR/$path"
-    echo "Copy back go package: $go_packages_tmp_dir/$path/ -> $TMP_WORK_DIR/$path/"
-    rsync -a "$go_packages_tmp_dir/$path/" "$TMP_WORK_DIR/$path/"
-    # Move the go package back into the TMP_WORK_DIR
-    #find "$go_package_tmp_dir/$path" -mindepth 1 -maxdepth 1 -print0 | xargs -0 mv -t "$TMP_WORK_DIR"
-  done
-fi
 
 if [[ $app_found == true ]]; then
   dokku_log_info2 "Installing from ./$app_subdir"
@@ -75,6 +72,22 @@ if [[ $app_found == true ]]; then
   find "$app_tmp_dir/app" -mindepth 1 -maxdepth 1 -print0 | xargs -0 $MV -t "$TMP_WORK_DIR"
   # Clean up
   rm -rf "$app_tmp_dir"
+fi
+
+if [[ $go_package_found == true ]]; then
+  for path in "${go_packages[@]}"; do
+    dokku_log_info2 "Extract go package: $name -> $path"
+
+    echo "Restore go package: $go_packages_tmp_dir/$path/ -> $TMP_WORK_DIR/$path/"
+    mkdir -p "$TMP_WORK_DIR/$path"
+    rsync -av "$go_packages_tmp_dir/$path/" "$TMP_WORK_DIR/$path/"
+
+    if [ -f "$TMP_WORK_DIR/go.mod" ]; then
+      $SED -i 's|replace github.com/oinume/products/packages/go => \.\./\.\./\.\./packages/go|replace github.com/oinume/products/packages/go => \./packages/go|' "$TMP_WORK_DIR/go.mod"
+      cd "$TMP_WORK_DIR"
+      go mod tidy
+    fi
+  done
 fi
 
 if [[ $app_found == false ]]; then
